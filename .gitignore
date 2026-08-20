@@ -1,0 +1,39 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- 虛擬環境 ----
+.venv/
+venv/
+env/
+
+# ---- 測試與工具快取 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- 編輯器 / 作業系統 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Notebook ----
+.ipynb_checkpoints/
+
+# ---- 資料 ----
+# 資料檔案不進版控，只保留目錄結構
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# ---- 環境變數 ----
+.env
+.env.*

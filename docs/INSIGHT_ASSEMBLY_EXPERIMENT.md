@@ -135,7 +135,7 @@ context 建立 3/3 的 `MULTI_METRIC_PATTERN`（三個指標方向不一致）�
 | **A. RECENT_10 / 15 的 OBP 保持 null** | OBP slot 產生 `explicit_null` statement，值為 `null`，附原因 | 2 個 slot，`interpretation_status = blocked_by_missing_data` |
 | **B. VS_CLOSER / STARTER / RELIEF 不假裝有 game-level 或 recent 資訊** | `rolling_percentile = null` + 原因；`game_snos = null` + 原因；`limitations.temporal_limitation` 明文記錄；`interpretation_status = factual_only` | 7 個 VS_* group 全部如此 |
 | **C. VS_LEFT / RIGHT 不能變成對下一場的預測** | `limitations.not_a_next_game_projection` 明文宣告；缺口 `next_starting_pitcher_hand` 保留為 `partially_available` | statement 只有季累計數字，無任何投射欄位 |
-| **D. VS_DOMESTIC / FOREIGN 的 nationality dependency 未調查，不填補** | `application_data_status = not_investigated`，`missing_for_application` 列出 `next_opponent_pitcher_nationality` | 2 個 group |
+| **D. VS_DOMESTIC / FOREIGN 的本土／外籍 dependency 未調查，不填補** | `application_data_status = not_investigated`，`missing_for_application` 列出 `next_starting_pitcher_registration_status` | 2 個 group |
 | **E. PATTERN 不建立新數值** | 只保留 `direction_per_metric` 與 `consistency_count`，摘要文字**不含任何小數點** | 4 個 PATTERN，12 次 difference 比對全部等於同 insight 既有 evidence |
 
 `VS_CLOSER` 的 PATTERN 摘要實際長這樣，沒有任何新數字：
@@ -286,7 +286,7 @@ RECENT_10：on_base_percentage = null（沒有可陳述的數值）。
 | RECENT_10 / RECENT_15 | `available` | `next_game_context` | **0** |
 | VS_LEFT / VS_RIGHT | `partially_available` | `next_starting_pitcher_hand` | 1 |
 | VS_STARTER / VS_RELIEF / VS_CLOSER | `unavailable` | `in_game_pitcher_role_at_plate_appearance` | 1 |
-| VS_DOMESTIC / VS_FOREIGN | `not_investigated` | `next_opponent_pitcher_nationality` | 1 |
+| VS_DOMESTIC / VS_FOREIGN | `not_investigated` | `next_starting_pitcher_registration_status` | 1 |
 
 9 筆 `required_additional_data` 全部保留（含 RECENT_* 那 2 筆已解決的），
 其中 7 筆列為缺口。每一筆都帶 `status`、`availability_source_step`、

@@ -188,7 +188,16 @@ class TestPlayerHeader(FrontendRenderBase):
         as_of = self.vm["header"]["dataAsOf"]
         self.assertEqual(as_of["referenceDate"]["text"],
                          self.payload["api"]["data_as_of"]["reference_date"])
-        self.assertEqual(as_of["referenceDate"]["text"], "2026-08-18")
+        # 不寫死日期（資料會隨 refresh 前進）。改驗證資料推導出來的不變量：
+        #   (a) ISO 日期格式
+        #   (b) 參考日 = 已完成比賽中最晚的一天，因此必定早於下一場
+        #   (c) 與 next_game.selection_rule 的參考日一致
+        self.assertRegex(as_of["referenceDate"]["text"], r"^\d{4}-\d{2}-\d{2}$")
+        next_game_date = self.payload["next_game"]["game"]["game_date"]
+        self.assertLess(as_of["referenceDate"]["text"], next_game_date)
+        self.assertEqual(
+            as_of["referenceDate"]["text"],
+            self.payload["next_game"]["selection_rule"]["reference_date"])
         self.assertTrue(as_of["clockIndependent"])
         self.assertEqual(len(as_of["sourceFileDigests"]), 3)
         for record in as_of["sourceFileDigests"]:
@@ -261,10 +270,24 @@ class TestSeasonBaseline(FrontendRenderBase):
                              str(src["plate_appearances"]))
 
     def test_ratio_formatting_keeps_full_precision_alongside(self):
-        avg = next(m for m in self.vm["seasonBaseline"]["metrics"]
-                   if m["metric"] == "batting_average")
-        self.assertEqual(avg["value"]["text"], ".311")
-        self.assertEqual(avg["value"]["full"], "0.31135531")
+        """驗證格式化規則本身，不寫死數值（數值會隨 refresh 改變）。
+
+        規則：headline 是棒球慣用的三位小數去前導 0（`.311`），
+        旁邊一律並排完整 8 位精度，且兩者都由同一個 payload 值產生。
+        """
+        for metric in self.vm["seasonBaseline"]["metrics"]:
+            raw = self.payload["season_baseline"]["metrics"][
+                metric["metric"]]["value"]
+            self.assertEqual(metric["value"]["raw"], raw)
+            self.assertEqual(metric["value"]["full"], f"{raw:.8f}")
+            expected_text = f"{raw:.3f}"
+            if expected_text.startswith("0."):
+                expected_text = expected_text[1:]
+            self.assertEqual(metric["value"]["text"], expected_text)
+            self.assertRegex(metric["value"]["text"], r"^\.\d{3}$")
+            # 完整精度沒有被藏起來，且與 headline 是同一個數
+            self.assertTrue(metric["value"]["full"].startswith("0."))
+            self.assertEqual(round(raw, 3), float(metric["value"]["text"]))
 
 
 class TestCurrentForm(FrontendRenderBase):

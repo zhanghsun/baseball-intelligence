@@ -442,17 +442,29 @@ class TestSourceFilesPreserved(RefreshTestBase):
             self.assertGreater(path.stat().st_size, 0)
 
     def test_historical_records_are_not_rewritten(self):
-        """比賽筆數與最早／最晚日期不變，歷史資料語意沒被改動。"""
-        logs = json.loads(
-            (DATA_DIR / "processed" / "zhang_yucheng_game_logs_2026.json")
-            .read_text(encoding="utf-8"))
+        """`--no-fetch` 前後逐場資料逐筆相同，歷史資料語意沒被改動。
+
+        刻意不寫死筆數（筆數會隨 refresh 增加）。改用資料推導的不變量：
+        逐場筆數必須等於 pipeline 算出的季出賽場數，且日期單調不遞減。
+        """
+        path = DATA_DIR / "processed" / "zhang_yucheng_game_logs_2026.json"
+        logs = json.loads(path.read_text(encoding="utf-8"))
         run_refresh(["--no-fetch"])
-        after = json.loads(
-            (DATA_DIR / "processed" / "zhang_yucheng_game_logs_2026.json")
-            .read_text(encoding="utf-8"))
+        after = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(len(after), len(logs))
         self.assertEqual(after, logs)
-        self.assertEqual(len(after), 77)
+        self.assertGreater(len(after), 0)
+
+        # 與 pipeline 交叉核對：processed 筆數 == 季累計出賽場數
+        output = refresh_data.build_product_output_now()
+        self.assertEqual(len(after), output["season_baseline"]["games"])
+        self.assertEqual(len(after), output["player"]["games_played"])
+
+        # 日期單調不遞減、game_sno 唯一（歷史順序沒被打亂）
+        dates = [g["game_date"] for g in after]
+        self.assertEqual(dates, sorted(dates))
+        snos = [g["game_sno"] for g in after]
+        self.assertEqual(len(snos), len(set(snos)))
 
 
 class TestNoSecondCache(RefreshTestBase):

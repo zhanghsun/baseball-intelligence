@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baseball Intelligence — 張育成 2026</title>
+  <meta name="description" content="CPBL 富邦悍將球員數據 insight（唯讀，資料來自 Step 23 API）" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!--
+    Step 24 Frontend MVP。
+
+    這一頁只做呈現。所有數字都來自 GET /api/player/zhang-yucheng，
+    前端不重算、不排序、不篩選、不建立 score / ranking / threshold，
+    也不產生任何建議或預測。
+  -->
+  <main id="app" class="app">
+    <noscript>
+      <div class="state state-error">
+        <h2>需要啟用 JavaScript</h2>
+        <p>本頁透過 fetch 呼叫後端 API 取得資料，因此需要 JavaScript。</p>
+      </div>
+    </noscript>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

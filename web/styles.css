@@ -102,6 +102,45 @@ h4 { font-size: 13px; margin: 0 0 6px; color: var(--text-dim);
 .digest-list { list-style: none; padding: 0; margin: 6px 0 0; }
 .digest-list li { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; }
 
+/* ---------------------------------------------------------------- player bar */
+
+.player-bar {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 16px 24px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.player-bar-label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.player-select {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 13.5px;
+  max-width: 100%;
+}
+
+.player-select:hover { border-color: var(--accent-dim); }
+.player-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.player-bar-note { color: var(--text-faint); }
+
+@media (max-width: 760px) {
+  .player-bar { padding: 14px 14px 0; }
+}
+
 /* ---------------------------------------------------------------- toc */
 
 .toc {

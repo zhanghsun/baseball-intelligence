@@ -3,18 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Baseball Intelligence — 張育成 2026</title>
-  <meta name="description" content="CPBL 富邦悍將球員數據 insight（唯讀，資料來自 Step 23 API）" />
+  <title>Baseball Intelligence — CPBL 球員數據 insight</title>
+  <meta name="description" content="CPBL 球員數據 insight（唯讀，資料來自 Step 23 API）" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <!--
-    Step 24 Frontend MVP。
+    Step 24 Frontend MVP，Step 28 加入 registry 驅動的球員選單。
 
-    這一頁只做呈現。所有數字都來自 GET /api/player/zhang-yucheng，
+    這一頁只做呈現。球員清單來自 GET /api/players，
+    各球員的資料來自 GET /api/player/<player_id>。
     前端不重算、不排序、不篩選、不建立 score / ranking / threshold，
     也不產生任何建議或預測。
   -->
+  <header id="player-bar" class="player-bar"></header>
   <main id="app" class="app">
     <noscript>
       <div class="state state-error">

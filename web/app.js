@@ -16,8 +16,9 @@ import {
 } from './render.js';
 
 const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
-const PLAYER_SLUG = 'zhang-yucheng';
+const PLAYERS_PATH = '/api/players';
 const ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.\-]+(:\d+)?$/;
+const PLAYER_ID_RE = /^[a-z0-9-]+$/;
 
 /** 允許用 ?api=http://host:port 覆寫，方便本機換 port。格式嚴格驗證。 */
 function resolveApiBase() {
@@ -25,6 +26,57 @@ function resolveApiBase() {
   const override = params.get('api');
   if (override && ORIGIN_RE.test(override)) return override.replace(/\/$/, '');
   return DEFAULT_API_BASE;
+}
+
+/** 允許用 ?player=<player_id> 深層連結到特定球員。格式嚴格驗證。 */
+function resolveRequestedPlayerId() {
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get('player');
+  return requested && PLAYER_ID_RE.test(requested) ? requested : null;
+}
+
+// ------------------------------------------------------- player registry（UI 層）
+
+/**
+ * `/api/players` 的球員清單 -> 選單項目。
+ *
+ * **順序完全照 API 給的順序**，沒有 sort。這裡只做欄位取用，不做任何計算。
+ */
+export function playerListItems(playersPayload) {
+  const players = (playersPayload && playersPayload.players) || [];
+  return players.map((p) => ({
+    playerId: p.player_id,
+    playerName: p.player_name,
+    team: p.team,
+    season: p.season,
+    kindName: p.kind_name,
+    label: `${p.player_name}（${p.team}）· ${p.season} ${p.kind_name}`,
+  }));
+}
+
+/**
+ * 決定要載入哪一位球員。
+ *
+ * 規則：`?player=` 指定且真的在清單裡就用它，否則用清單第一筆（registry 順序）。
+ * 清單為空時回 null。**不猜測、不 fallback 到任何寫死的 id。**
+ */
+export function resolvePlayerId(playersPayload, requestedId) {
+  const items = playerListItems(playersPayload);
+  if (items.length === 0) return null;
+  if (requestedId && items.some((i) => i.playerId === requestedId)) {
+    return requestedId;
+  }
+  return items[0].playerId;
+}
+
+/** 組出某位球員的 product output 端點 URL。 */
+export function playerEndpointUrl(apiBase, playerId) {
+  return `${apiBase}/api/player/${playerId}`;
+}
+
+/** 組出球員清單端點 URL。 */
+export function playersEndpointUrl(apiBase) {
+  return `${apiBase}${PLAYERS_PATH}`;
 }
 
 // ---------------------------------------------------------------- DOM 工具
@@ -924,12 +976,12 @@ function renderMeta(meta) {
 
 // ---------------------------------------------------------------- 狀態畫面
 
-function renderLoading(root) {
+function renderLoading(root, url = null) {
   root.replaceChildren(
     el('div', { className: 'state state-loading' }, [
       el('div', { className: 'spinner' }),
       el('p', { text: '正在向後端 API 取得資料……' }),
-      el('p', { className: 'micro mono', text: `${resolveApiBase()}/api/player/${PLAYER_SLUG}` }),
+      url ? el('p', { className: 'micro mono', text: url }) : null,
     ])
   );
 }
@@ -1006,10 +1058,22 @@ function renderPage(root, vm) {
 
 // ---------------------------------------------------------------- 載入流程
 
-export async function loadAndRender(root, { fetchImpl = fetch, apiBase = null } = {}) {
+export async function loadAndRender(
+  root,
+  { fetchImpl = fetch, apiBase = null, playerId = null } = {}
+) {
   const base = apiBase || resolveApiBase();
-  const url = `${base}/api/player/${PLAYER_SLUG}`;
-  renderLoading(root);
+  if (!playerId) {
+    renderError(
+      root,
+      buildErrorViewModel('unexpected', {
+        message: '沒有指定球員。請先從 /api/players 取得球員清單。',
+      })
+    );
+    return { ok: false, kind: 'unexpected' };
+  }
+  const url = playerEndpointUrl(base, playerId);
+  renderLoading(root, url);
 
   let response;
   try {
@@ -1049,9 +1113,118 @@ export async function loadAndRender(root, { fetchImpl = fetch, apiBase = null } 
   return { ok: false, kind };
 }
 
+// ---------------------------------------------------------------- player 選單
+
+/**
+ * 建立球員選單（UI 層，只在 app.js）。
+ *
+ * 順序照 `/api/players` 給的順序，沒有 sort。單一球員時仍然顯示，
+ * 讓使用者看得到目前 registry 實際支援誰。
+ */
+function renderPlayerBar(bar, items, activePlayerId, onSelect) {
+  const select = el('select', {
+    className: 'player-select',
+    attrs: { id: 'player-select', 'aria-label': '選擇球員' },
+  });
+  for (const item of items) {
+    const option = el('option', {
+      text: item.label,
+      attrs: { value: item.playerId },
+    });
+    if (item.playerId === activePlayerId) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => onSelect(select.value));
+
+  bar.replaceChildren(
+    el('label', {
+      className: 'player-bar-label',
+      text: '球員',
+      attrs: { for: 'player-select' },
+    }),
+    select,
+    el('span', {
+      className: 'player-bar-note micro',
+      text:
+        items.length === 1
+          ? '目前 registry 只有一位球員（架構已支援多球員）'
+          : `registry 共 ${items.length} 位球員（順序為 registry 順序，非排名）`,
+    })
+  );
+  return select;
+}
+
+function renderPlayerBarError(bar, vm) {
+  bar.replaceChildren(
+    el('span', { className: 'player-bar-label', text: '球員' }),
+    el('span', { className: 'missing-label', text: '無法取得球員清單' }),
+    vm.message ? el('span', { className: 'micro', text: vm.message }) : null
+  );
+}
+
+/** 取得球員清單。只做 fetch 與 JSON 解析，不做任何資料處理。 */
+export async function loadPlayers(apiBase, fetchImpl = fetch) {
+  const response = await fetchImpl(playersEndpointUrl(apiBase), {
+    headers: { Accept: 'application/json' },
+  });
+  const body = await response.json();
+  return { status: response.status, body };
+}
+
+/** 頁面啟動：先取球員清單，再載入選定球員的產品輸出。 */
+export async function bootstrap(bar, root, { fetchImpl = fetch, apiBase = null } = {}) {
+  const base = apiBase || resolveApiBase();
+  let players;
+  try {
+    players = await loadPlayers(base, fetchImpl);
+  } catch (networkError) {
+    const vm = buildErrorViewModel('network', {
+      message: '瀏覽器無法完成請求。',
+    });
+    if (bar) renderPlayerBarError(bar, vm);
+    renderError(root, vm);
+    return { ok: false, kind: 'network' };
+  }
+
+  if (players.status !== 200) {
+    const vm = buildErrorViewModel('unexpected', {
+      httpStatus: players.status,
+      message: '無法取得球員清單。',
+    });
+    if (bar) renderPlayerBarError(bar, vm);
+    renderError(root, vm);
+    return { ok: false, kind: 'unexpected' };
+  }
+
+  const items = playerListItems(players.body);
+  const activePlayerId = resolvePlayerId(players.body, resolveRequestedPlayerId());
+  if (!activePlayerId) {
+    const vm = buildErrorViewModel('unexpected', {
+      message: 'registry 中目前沒有任何球員。',
+    });
+    if (bar) renderPlayerBarError(bar, vm);
+    renderError(root, vm);
+    return { ok: false, kind: 'unexpected' };
+  }
+
+  const select = bar
+    ? renderPlayerBar(bar, items, activePlayerId, (playerId) => {
+        loadAndRender(root, { fetchImpl, apiBase: base, playerId });
+      })
+    : null;
+
+  const result = await loadAndRender(root, {
+    fetchImpl,
+    apiBase: base,
+    playerId: activePlayerId,
+  });
+  return { ...result, activePlayerId, playerCount: items.length, select };
+}
+
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('DOMContentLoaded', () => {
     const root = document.getElementById('app');
-    if (root) loadAndRender(root);
+    const bar = document.getElementById('player-bar');
+    if (root) bootstrap(bar, root);
   });
 }

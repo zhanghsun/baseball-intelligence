@@ -895,7 +895,11 @@ class TestFrontendStaticInspection(unittest.TestCase):
         paths = set()
         for literal in self.literals["app.js"]:
             paths.update(re.findall(r"/api/[a-zA-Z0-9/_${}\-]+", literal))
-        self.assertEqual(paths, {"/api/player/${PLAYER_SLUG}"})
+        # Step 28：球員清單端點 + 由 registry 驅動的球員端點。
+        # 沒有任何寫死的 player id。
+        self.assertEqual(paths, {"/api/players", "/api/player/${playerId}"})
+        for path in paths:
+            self.assertNotIn("zhang", path)
 
     def test_frontend_does_not_use_browser_clock_for_data_date(self):
         for name in ("render.js", "app.js"):

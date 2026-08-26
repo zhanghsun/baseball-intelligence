@@ -410,7 +410,9 @@ class TestErrorHandling(ApiTestBase):
     def test_internal_failure_returns_machine_readable_500(self):
         original = api.CACHE.get
 
-        def boom():
+        # Step 28：CACHE.get 改成以 player_id 為鍵，簽章要跟著調整，
+        # 否則會提前拋 TypeError，就測不到「錯誤細節不外洩」這件事。
+        def boom(player_id):
             raise RuntimeError(
                 "boom at C:/Users/secret/path/file.py line 42")
 

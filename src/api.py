@@ -53,6 +53,17 @@ from candidate_insights import (  # noqa: E402
     sha256_of,
 )
 from insight_chain import SCHEDULE_PATH, load_schedule  # noqa: E402
+from player_registry import (  # noqa: E402
+    ORDER_NOTE,
+    PLAYER_BY_ID,
+    PLAYER_IDS,
+    REGISTRY_SOURCE,
+    default_player_id,
+    get_player,
+    player_ids,
+    public_player_list,
+    validate_registry,
+)
 from product_output_model import build_product_output  # noqa: E402
 
 API_VERSION = "step23-v1"
@@ -60,14 +71,9 @@ API_VERSION = "step23-v1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
-# slug -> 目前唯一支援的球員。Step 22 的產品輸出只涵蓋一位球員。
-PLAYER_REGISTRY = {
-    "zhang-yucheng": {
-        "player_acnt": "0000006888",
-        "season": 2026,
-        "kind_code": "A",
-    },
-}
+# 球員清單完全由 src/player_registry.py 驅動。api.py **不再寫死任何 player id**，
+# 也不保留第二份 player mapping。`PLAYER_REGISTRY` 只是那份 registry 的別名。
+PLAYER_REGISTRY = PLAYER_BY_ID
 
 # 受控的錯誤代碼詞彙。回應主體只會出現這些值。
 ERROR_CODES = (
@@ -84,9 +90,11 @@ SOURCE_FILES = (PLAYER_LOG_PATH, APART_CACHE_PATH, SCHEDULE_PATH)
 ENDPOINTS = (
     {"method": "GET", "path": "/api/health",
      "description": "後端存活檢查，不依賴任何外部網路"},
-    {"method": "GET", "path": "/api/player/{player_slug}",
+    {"method": "GET", "path": "/api/players",
+     "description": "回傳 registry 中可用的球員清單（registry 順序，未排序）"},
+    {"method": "GET", "path": "/api/player/{player_id}",
      "description": "回傳 Step 22 Product Output（唯讀）",
-     "available_player_slugs": sorted(PLAYER_REGISTRY)},
+     "available_player_ids": player_ids()},
 )
 
 API_CONTAINS_NO = [
@@ -100,31 +108,64 @@ API_CONTAINS_NO = [
 # ------------------------------------------------------------------ 快取
 
 class ProductOutputCache:
-    """整條 pipeline 只跑一次，之後所有請求共用同一個結果。
+    """每位球員的 pipeline 只跑一次，之後所有請求共用同一個結果。
 
     這是「資料收集」與「資料供應」分離的關鍵：HTTP 請求路徑上沒有任何抓取，
     也沒有重算。快取內容只依賴本地檔案，不依賴時鐘。
+
+    Step 28 起以 `player_id` 為鍵。目前 registry 只有一位球員，因此實際上只有
+    一筆；改成 keyed 是為了讓未來加入球員時不需要再改這一層。
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._output: dict | None = None
+        self._outputs: dict[str, dict] = {}
 
     @property
     def warm(self) -> bool:
-        return self._output is not None
+        return bool(self._outputs)
 
-    def get(self) -> dict:
+    @property
+    def warm_player_ids(self) -> list[str]:
+        """依 registry 順序列出已快取的球員，不排序。"""
+        return [pid for pid in PLAYER_IDS if pid in self._outputs]
+
+    def get(self, player_id: str) -> dict:
+        entry = get_player(player_id)
+        if entry is None:
+            raise KeyError(player_id)
         with self._lock:
-            if self._output is None:
+            if player_id not in self._outputs:
                 logs, apart_rows = load_inputs()
                 schedule = load_schedule()
-                self._output = build_product_output(logs, apart_rows, schedule)
-            return self._output
+                output = build_product_output(logs, apart_rows, schedule)
+                verify_output_matches_registry(entry, output)
+                self._outputs[player_id] = output
+            return self._outputs[player_id]
 
     def clear(self) -> None:
         with self._lock:
-            self._output = None
+            self._outputs.clear()
+
+
+def verify_output_matches_registry(entry: dict, output: dict) -> None:
+    """確認 pipeline 產出的 subject 真的是 registry 要求的那位球員。
+
+    這道檢查存在的理由：registry 是宣告，pipeline 是實作。如果未來 registry
+    加了一位球員但 pipeline 還沒支援，這裡會直接擋下來，而不是把別人的資料
+    當成他的回傳出去。
+    """
+    player = output["player"]
+    mismatches = [
+        f"{field}: registry={entry[field]!r} product_output={player[field]!r}"
+        for field in ("player_acnt", "season", "kind_code", "player_name")
+        if player.get(field) != entry[field]
+    ]
+    if mismatches:
+        raise ValueError(
+            f"product output 的 subject 與 registry 項目 {entry['player_id']} "
+            "不符：" + "；".join(mismatches)
+        )
 
 
 CACHE = ProductOutputCache()
@@ -145,13 +186,22 @@ def source_file_digests() -> list[dict]:
     return sorted(out, key=lambda r: r["path"])
 
 
-def build_api_block(slug: str, output: dict) -> dict:
+def build_api_block(player_id: str, output: dict) -> dict:
     md = output["metadata"]
     sel = output["next_game"]["selection_rule"]
+    entry = get_player(player_id)
     return {
         "api_version": API_VERSION,
-        "endpoint": f"/api/player/{slug}",
-        "player_slug": slug,
+        "endpoint": f"/api/player/{player_id}",
+        "player_id": player_id,
+        # Step 23 就有的欄位名，保留為別名以維持回溯相容
+        "player_slug": player_id,
+        "player_slug_is_alias_of": "player_id",
+        "player_name": entry["player_name"],
+        "season": entry["season"],
+        "kind_code": entry["kind_code"],
+        "registry_source": dict(REGISTRY_SOURCE),
+        "players_endpoint": "/api/players",
         "read_only": True,
         "product_output_version": md["product_output_version"],
         "source_of_truth": {
@@ -186,15 +236,40 @@ def build_api_block(slug: str, output: dict) -> dict:
     }
 
 
-def build_player_payload(slug: str) -> dict:
+def build_player_payload(player_id: str) -> dict:
     """Step 22 的 9 個頂層區塊原樣輸出，另加一個命名空間化的 `api` 區塊。
 
     `api` 是新增，不是取代：Step 22 的 9 個鍵一個都沒有被改名、移除或重新包裝。
     """
-    output = CACHE.get()
+    output = CACHE.get(player_id)
     payload = dict(output)  # 淺拷貝，避免把 api 區塊寫回快取物件
-    payload["api"] = build_api_block(slug, output)
+    payload["api"] = build_api_block(player_id, output)
     return payload
+
+
+def build_players_payload() -> dict:
+    """registry 中的球員清單。順序 = registry 順序，沒有排序、沒有名次。"""
+    players = public_player_list()
+    return {
+        "players": players,
+        "player_count": len(players),
+        "player_ids": player_ids(),
+        "order": dict(ORDER_NOTE),
+        "registry_source": dict(REGISTRY_SOURCE),
+        "api_version": API_VERSION,
+        "read_only": True,
+        "scope_note": (
+            "這是目前產品實際支援的球員清單。架構已由 registry 驅動，"
+            "但只有真實存在資料的球員會出現在這裡，不會為了看起來支援多球員"
+            "而列出沒有資料的球員。"
+        ),
+        "contains_no": list(API_CONTAINS_NO),
+    }
+
+
+def registry_problems() -> list[str]:
+    """registry 一致性問題（純本地檢查，不碰網路、不跑 pipeline）。"""
+    return validate_registry()
 
 
 def build_health_payload() -> dict:
@@ -203,9 +278,16 @@ def build_health_payload() -> dict:
         "status": "ok",
         "api_version": API_VERSION,
         "endpoints": [dict(e) for e in ENDPOINTS],
-        "available_player_slugs": sorted(PLAYER_REGISTRY),
+        # registry 順序，沒有排序。Step 23 就有的欄位名保留為別名。
+        "available_player_ids": player_ids(),
+        "available_player_slugs": player_ids(),
+        "player_count": len(PLAYER_IDS),
+        "registry_source": dict(REGISTRY_SOURCE),
         "checks": {
             "product_output_cache_warm": CACHE.warm,
+            "warm_player_ids": CACHE.warm_player_ids,
+            "registry_consistent": not registry_problems(),
+            "registry_problems": registry_problems(),
             "local_source_files_present": {
                 path.name: path.exists() for path in SOURCE_FILES
             },
@@ -266,38 +348,48 @@ def dispatch(method: str, raw_path: str) -> tuple[int, dict]:
     if segments == ["api", "health"]:
         return 200, build_health_payload()
 
+    if segments == ["api", "players"]:
+        return 200, build_players_payload()
+
     if segments[:2] == ["api", "player"]:
         if len(segments) == 2:
             return 400, error_payload(
                 "player_slug_required", 400,
-                "路徑缺少 player slug。",
-                expected_path="/api/player/{player_slug}",
-                available_player_slugs=sorted(PLAYER_REGISTRY),
+                "路徑缺少 player id。",
+                expected_path="/api/player/{player_id}",
+                available_player_ids=player_ids(),
+                available_player_slugs=player_ids(),
+                players_endpoint="/api/players",
             )
         if len(segments) > 3:
             return 400, error_payload(
                 "malformed_path", 400,
                 "路徑片段過多。",
-                expected_path="/api/player/{player_slug}",
+                expected_path="/api/player/{player_id}",
                 received_segment_count=len(segments),
             )
-        slug = segments[2]
-        if slug not in PLAYER_REGISTRY:
+        # registry lookup。api.py 沒有任何寫死的 player id。
+        player_id = segments[2]
+        if get_player(player_id) is None:
             return 404, error_payload(
                 "player_not_found", 404,
                 "沒有這位球員的產品輸出。",
-                requested_player_slug=slug,
-                available_player_slugs=sorted(PLAYER_REGISTRY),
+                requested_player_id=player_id,
+                requested_player_slug=player_id,
+                available_player_ids=player_ids(),
+                available_player_slugs=player_ids(),
+                players_endpoint="/api/players",
             )
         try:
-            return 200, build_player_payload(slug)
+            return 200, build_player_payload(player_id)
         except Exception:
             # 只把細節寫到 stderr；回應主體不含 traceback 或檔案系統路徑
             traceback.print_exc(file=sys.stderr)
             return 500, error_payload(
                 "product_output_generation_failed", 500,
                 "產生產品輸出時發生內部錯誤。",
-                player_slug=slug,
+                player_id=player_id,
+                player_slug=player_id,
                 detail_disclosed=False,
                 detail_note="錯誤細節只記錄在伺服器端日誌，不隨回應輸出。",
             )
@@ -407,10 +499,20 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    problems = registry_problems()
+    if problems:
+        print("[api] player registry 一致性檢查失敗：", file=sys.stderr)
+        for item in problems:
+            print(f"[api]   - {item}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"[api] player registry：{len(PLAYER_IDS)} 位球員 {player_ids()}",
+          file=sys.stderr)
+
     if args.warm:
         print("[api] 預先建立產品輸出……", file=sys.stderr)
-        CACHE.get()
-        print("[api] 產品輸出已快取。", file=sys.stderr)
+        for player_id in player_ids():
+            CACHE.get(player_id)
+            print(f"[api]   {player_id} 已快取。", file=sys.stderr)
 
     server = make_server(args.host, args.port, tuple(args.cors_origin))
     host, port = server.server_address[:2]

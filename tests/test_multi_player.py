@@ -907,6 +907,188 @@ class TestRegistryIsSingleIdentitySource(MultiPlayerBase):
             self.assertEqual(params[0].name, "player_id", func.__name__)
             self.assertIsNone(params[0].default, func.__name__)
 
+    # ---- Step 29D：candidate generation 參數化 ----
+
+    def _candidate_sets(self, subject=None):
+        """用 legacy 或指定 subject 產生三組 candidate。"""
+        import candidate_insights as ci
+        logs, apart_rows = ci.load_inputs()
+        contexts = ci.build_context_evidence(apart_rows)
+        season = ci.build_season_baseline(logs, contexts)
+        kwargs = {} if subject is None else {"subject": subject}
+        trend, _internals = ci.build_trend_candidates(logs, season, **kwargs)
+        context = ci.build_context_candidates(contexts, season, **kwargs)
+        pattern, direction_log = ci.build_pattern_candidates(
+            contexts, season, **kwargs)
+        return {"trend": trend, "context": context, "pattern": pattern,
+                "direction_log": direction_log}
+
+    def test_builders_accept_optional_subject(self):
+        import inspect
+        import candidate_insights as ci
+        for func in (ci.build_trend_candidates, ci.build_context_candidates,
+                     ci.build_pattern_candidates):
+            params = list(inspect.signature(func).parameters.values())
+            self.assertEqual(params[-1].name, "subject", func.__name__)
+            self.assertIsNone(params[-1].default, func.__name__)
+
+    def test_legacy_builder_calls_still_work(self):
+        sets = self._candidate_sets()
+        for key in ("trend", "context", "pattern"):
+            self.assertGreater(len(sets[key]), 0, key)
+        self.assertGreater(len(sets["direction_log"]), 0)
+
+    def test_registry_subject_produces_identical_candidates(self):
+        legacy = self._candidate_sets()
+        keyed = self._candidate_sets(registry.subject(self.player_id))
+        for key in ("trend", "context", "pattern", "direction_log"):
+            self.assertEqual(keyed[key], legacy[key],
+                             f"{key} 的輸出與 legacy 不一致")
+
+    def test_candidate_ids_identical_and_slug_derived(self):
+        legacy = self._candidate_sets()
+        keyed = self._candidate_sets(registry.subject(self.player_id))
+        slug = registry.subject_slug(self.player_id)
+        for key in ("trend", "context", "pattern"):
+            legacy_ids = [c["candidate_id"] for c in legacy[key]]
+            keyed_ids = [c["candidate_id"] for c in keyed[key]]
+            self.assertEqual(keyed_ids, legacy_ids, key)
+            for candidate_id in keyed_ids:
+                self.assertIn(slug, candidate_id)
+        # id 前綴仍由 candidate type 決定（格式未變）
+        prefixes = {"trend": "TREND-", "context": "CONTEXT-",
+                    "pattern": "PATTERN-"}
+        for key, prefix in prefixes.items():
+            for candidate in keyed[key]:
+                self.assertTrue(
+                    candidate["candidate_id"].startswith(prefix + slug),
+                    candidate["candidate_id"])
+
+    def test_candidate_subject_equals_passed_subject(self):
+        subject = registry.subject(self.player_id)
+        keyed = self._candidate_sets(subject)
+        for key in ("trend", "context", "pattern"):
+            for candidate in keyed[key]:
+                self.assertEqual(candidate["subject"], subject)
+                # 是副本，不是共用同一個 dict 物件
+                self.assertIsNot(candidate["subject"], subject)
+
+    def test_candidate_source_files_come_from_registry(self):
+        rel = registry.data_relpaths(self.player_id)
+        keyed = self._candidate_sets(registry.subject(self.player_id))
+        expected = {
+            "trend": [rel["player_log"]],
+            "context": [rel["apart_raw"], rel["player_log"]],
+            "pattern": [rel["apart_raw"], rel["player_log"]],
+        }
+        for key, files in expected.items():
+            for candidate in keyed[key]:
+                self.assertEqual(candidate["source_files"], files, key)
+                for path in candidate["source_files"]:
+                    self.assertTrue((ROOT / path).exists(), path)
+
+    def test_unknown_subject_does_not_fall_back(self):
+        import candidate_insights as ci
+        logs, apart_rows = ci.load_inputs()
+        contexts = ci.build_context_evidence(apart_rows)
+        season = ci.build_season_baseline(logs, contexts)
+        bogus = dict(registry.subject(self.player_id),
+                     player_acnt="9999999999")
+        for func, args in ((ci.build_trend_candidates, (logs, season)),
+                           (ci.build_context_candidates, (contexts, season)),
+                           (ci.build_pattern_candidates, (contexts, season))):
+            with self.assertRaises(KeyError):
+                func(*args, subject=bogus)
+            with self.assertRaises(KeyError):
+                func(*args, subject={})
+        with self.assertRaises(KeyError):
+            ci.resolve_identity(bogus)
+
+    def test_resolve_identity_legacy_matches_module_constants(self):
+        import candidate_insights as ci
+        identity = ci.resolve_identity()
+        self.assertEqual(identity["player_id"], self.player_id)
+        self.assertEqual(identity["subject"], ci.SUBJECT)
+        self.assertEqual(identity["subject_slug"], ci.SUBJECT_SLUG)
+        rel = registry.data_relpaths(self.player_id)
+        self.assertEqual(identity["source_files"]["trend"],
+                         [rel["player_log"]])
+        self.assertEqual(identity["source_files"]["context"],
+                         [rel["apart_raw"], rel["player_log"]])
+
+    def test_candidate_behaviour_unchanged(self):
+        """type / scope / metric / direction / PATTERN 判定完全不變。"""
+        legacy = self._candidate_sets()
+        keyed = self._candidate_sets(registry.subject(self.player_id))
+        for key in ("trend", "context", "pattern"):
+            for a, b in zip(legacy[key], keyed[key]):
+                for field in ("type", "metric", "at_bats",
+                              "plate_appearances", "ranking_inputs"):
+                    if field in a:
+                        self.assertEqual(a[field], b[field], f"{key}.{field}")
+        # PATTERN 只在三個方向一致時建立，數量與方向記錄都不變
+        self.assertEqual(len(keyed["pattern"]), len(legacy["pattern"]))
+        for candidate in keyed["pattern"]:
+            self.assertEqual(candidate["consistency_count"],
+                             candidate["total_metrics"])
+
+    def test_classification_and_grouping_unchanged(self):
+        """classification / grouping 由既有模組計算，結果與 legacy 相同。"""
+        from noteworthy_insights import build_all as build_classification
+        import candidate_insights as ci
+        logs, apart_rows = ci.load_inputs()
+        candidates, views, samples, _pbc, nw = build_classification(
+            logs, apart_rows)
+        self.assertEqual(len(candidates), 29)
+        counts: dict = {}
+        for record in nw:
+            counts[record["classification"]] = counts.get(
+                record["classification"], 0) + 1
+        self.assertEqual(counts, {"noteworthy": 20, "observation": 9})
+        scopes = {views[c["candidate_id"]]["window_or_scope"]
+                  for c in candidates}
+        self.assertEqual(len(scopes), 9)
+
+    def test_candidate_generation_uses_no_player_literals(self):
+        """AST：三個 builder 的函式體不得含球員字面值（不只 module 層級）。"""
+        source = (ROOT / "src" / "candidate_insights.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        literals = (
+            self.subject["player_acnt"], self.subject["player_name"],
+            registry.subject_slug(self.player_id),
+            "zhang_yucheng", "apart_score_", "follow_score_",
+        )
+        targets = {"build_trend_candidates", "build_context_candidates",
+                   "build_pattern_candidates"}
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in targets:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    for bad in literals:
+                        if bad in sub.value:
+                            offenders.append(f"{node.name}:{sub.lineno} {bad!r}")
+        self.assertEqual(offenders, [], f"builder 仍有球員字面值：{offenders[:5]}")
+
+    def test_builders_do_not_read_module_subject_constants(self):
+        """AST：三個 builder 的函式體不得再引用 SUBJECT / SUBJECT_SLUG。"""
+        tree = ast.parse((ROOT / "src" / "candidate_insights.py").read_text(
+            encoding="utf-8"))
+        targets = {"build_trend_candidates", "build_context_candidates",
+                   "build_pattern_candidates"}
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in targets:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and sub.id in ("SUBJECT",
+                                                            "SUBJECT_SLUG"):
+                    offenders.append(f"{node.name}:{sub.lineno} {sub.id}")
+        self.assertEqual(offenders, [],
+                         f"builder 仍直接讀模組層級 subject：{offenders}")
+
     # ---- 6. 沒有引入第二位球員 ----
 
     def test_still_exactly_one_player(self):

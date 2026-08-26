@@ -96,6 +96,15 @@ OUTPUT_PATH = _DATA_PATHS["candidate_output"]
 SUBJECT = registry.subject(_ACTIVE_PLAYER_ID)
 SUBJECT_SLUG = registry.subject_slug(_ACTIVE_PLAYER_ID)
 
+# candidate 的 source_files 用的 repo 相對路徑。也是 registry 衍生，不寫死檔名。
+_DATA_RELPATHS = registry.data_relpaths(_ACTIVE_PLAYER_ID)
+_LEGACY_SOURCE_FILES = {
+    # TREND 只用逐場 processed 資料
+    "trend": [_DATA_RELPATHS["player_log"]],
+    # CONTEXT / PATTERN 用官方分項快取 + 逐場 processed 資料（順序即既有順序）
+    "context": [_DATA_RELPATHS["apart_raw"], _DATA_RELPATHS["player_log"]],
+}
+
 # 官方 ItemName -> candidate 用的 context 代碼
 CONTEXT_CODES = {
     "VS. 右投": "VS_RIGHT",
@@ -146,6 +155,53 @@ def fmt(value: float | None, digits: int = 8) -> str:
 
 
 # ------------------------------------------------------------------ 載入 evidence
+
+def resolve_identity(subject: dict | None = None) -> dict:
+    """把 subject 解析成 candidate builder 需要的完整身分包。
+
+    回傳：`player_id` / `subject`（7 欄位）/ `subject_slug` / `source_files`。
+
+    `subject is None`
+        legacy 行為。直接用 import 時就從 registry 衍生好的模組常數，
+        呼叫期間不再讀 registry，因此與 Step 29D 之前的行為逐位元相同。
+
+    指定 `subject`
+        以 (player_acnt, season, kind_code) 去 registry 找對應項目，
+        再取該項目的 subject_slug 與資料路徑。
+        **找不到就拋 KeyError，絕不 fallback 到任何預設球員。**
+        builder 本身不重複解析 registry，只使用這裡解析好的結果。
+    """
+    if subject is None:
+        return {
+            "player_id": _ACTIVE_PLAYER_ID,
+            "subject": dict(SUBJECT),
+            "subject_slug": SUBJECT_SLUG,
+            "source_files": {k: list(v) for k, v in _LEGACY_SOURCE_FILES.items()},
+        }
+
+    key = (subject.get("player_acnt"), subject.get("season"),
+           subject.get("kind_code"))
+    matches = [
+        entry for entry in registry.PLAYERS
+        if (entry["player_acnt"], entry["season"], entry["kind_code"]) == key
+    ]
+    if len(matches) != 1:
+        raise KeyError(
+            f"registry 中找不到唯一對應 (player_acnt, season, kind_code)={key} "
+            f"的球員（符合 {len(matches)} 筆）。candidate builder 不會猜測身分。"
+        )
+    player_id = matches[0]["player_id"]
+    rel = registry.data_relpaths(player_id)
+    return {
+        "player_id": player_id,
+        "subject": dict(subject),
+        "subject_slug": registry.subject_slug(player_id),
+        "source_files": {
+            "trend": [rel["player_log"]],
+            "context": [rel["apart_raw"], rel["player_log"]],
+        },
+    }
+
 
 def input_paths(player_id: str | None = None) -> tuple[Path, Path]:
     """回傳 (player_log, apart_raw) 兩個輸入路徑。
@@ -220,8 +276,17 @@ def build_season_baseline(logs: list, contexts: dict) -> dict:
 
 # ------------------------------------------------------------------ Candidate Type 1
 
-def build_trend_candidates(logs: list, season: dict) -> tuple[list, dict]:
-    """Recent 10 / Recent 15 vs 季累計。回傳 (candidates, 供驗證用的中間結果)。"""
+def build_trend_candidates(logs: list, season: dict,
+                           subject: dict | None = None) -> tuple[list, dict]:
+    """Recent 10 / Recent 15 vs 季累計。回傳 (candidates, 供驗證用的中間結果)。
+
+    Step 29D：`subject` 只決定 identity（candidate_id 的 slug、candidate["subject"]、
+    source_files）。**計算規則、metric、direction、窗口定義完全未變。**
+    """
+    identity = resolve_identity(subject)
+    subject_slug = identity["subject_slug"]
+    subject_fields = identity["subject"]
+    source_files = identity["source_files"]["trend"]
     games = sort_by_date(logs)
     candidates = []
     internals: dict = {}
@@ -255,9 +320,9 @@ def build_trend_candidates(logs: list, season: dict) -> tuple[list, dict]:
             metric_short = {"batting_average": "AVG", "slugging_percentage": "SLG"}[metric]
             candidates.append(
                 {
-                    "candidate_id": f"TREND-{SUBJECT_SLUG}-{window_name}-{metric_short}",
+                    "candidate_id": f"TREND-{subject_slug}-{window_name}-{metric_short}",
                     "type": "TREND",
-                    "subject": dict(SUBJECT),
+                    "subject": dict(subject_fields),
                     "metric": metric,
                     "window": {
                         "name": window_name,
@@ -297,9 +362,7 @@ def build_trend_candidates(logs: list, season: dict) -> tuple[list, dict]:
                         "consistency_count": None,
                     },
                     "source_evidence": ["player_form_analysis", "rolling_baseline"],
-                    "source_files": [
-                        "data/processed/zhang_yucheng_game_logs_2026.json"
-                    ],
+                    "source_files": list(source_files),
                     "calculation_reference": {
                         "formula": formula,
                         "sorting": "依 (game_date, game_sno) 升冪；不使用 game_sno 排序",
@@ -346,7 +409,16 @@ CONTEXT_METRICS = (
 )
 
 
-def build_context_candidates(contexts: dict, season: dict) -> list:
+def build_context_candidates(contexts: dict, season: dict,
+                             subject: dict | None = None) -> list:
+    """官方分項 vs 季累計。
+
+    Step 29D：`subject` 只決定 identity，比較規則與 metric 完全未變。
+    """
+    identity = resolve_identity(subject)
+    subject_slug = identity["subject_slug"]
+    subject_fields = identity["subject"]
+    source_files = identity["source_files"]["context"]
     candidates = []
     for code, ctx in contexts.items():
         for metric, short, formula in CONTEXT_METRICS:
@@ -355,9 +427,9 @@ def build_context_candidates(contexts: dict, season: dict) -> list:
             diff = None if (value is None or baseline is None) else value - baseline
             candidates.append(
                 {
-                    "candidate_id": f"CONTEXT-{SUBJECT_SLUG}-{code}-{short}",
+                    "candidate_id": f"CONTEXT-{subject_slug}-{code}-{short}",
                     "type": "CONTEXT",
-                    "subject": dict(SUBJECT),
+                    "subject": dict(subject_fields),
                     "context": {
                         "code": code,
                         "official_item_name": ctx["item_name"],
@@ -410,10 +482,7 @@ def build_context_candidates(contexts: dict, season: dict) -> list:
                         "consistency_count": None,
                     },
                     "source_evidence": ["contextual_evidence"],
-                    "source_files": [
-                        "data/raw/apart_score_0000006888_2026_A_01.json",
-                        "data/processed/zhang_yucheng_game_logs_2026.json",
-                    ],
+                    "source_files": list(source_files),
                     "calculation_reference": {
                         "formula": formula,
                         "walks_semantics": (
@@ -445,12 +514,25 @@ def build_context_candidates(contexts: dict, season: dict) -> list:
 
 # ------------------------------------------------------------------ Candidate Type 3
 
-def build_pattern_candidates(contexts: dict, season: dict) -> tuple[list, list]:
+def build_pattern_candidates(contexts: dict, season: dict,
+                             subject: dict | None = None) -> tuple[list, list]:
+    """跨指標方向一致的 PATTERN candidate。
+
+    Step 29D：`subject` 只決定 identity。**PATTERN 的判定條件完全未變**
+    （仍是三個指標與季累計比較的方向必須一致）。
+    """
     """同一 context 中 AVG / OBP / SLG 三個方向一致時建立 pattern。
 
     回傳 (candidates, 全部 context 的方向記錄)。方向記錄含未形成 pattern 的，
     是為了讓輸出透明，不是為了篩選。
+
+    Step 29D：`subject` 只決定 identity（candidate_id 的 slug、
+    candidate["subject"]、source_files）。**PATTERN 判定條件完全未變。**
     """
+    identity = resolve_identity(subject)
+    subject_slug = identity["subject_slug"]
+    subject_fields = identity["subject"]
+    source_files = identity["source_files"]["context"]
     candidates = []
     direction_log = []
 
@@ -480,9 +562,9 @@ def build_pattern_candidates(contexts: dict, season: dict) -> tuple[list, list]:
 
         candidates.append(
             {
-                "candidate_id": f"PATTERN-{SUBJECT_SLUG}-{code}-AVG_OBP_SLG",
+                "candidate_id": f"PATTERN-{subject_slug}-{code}-AVG_OBP_SLG",
                 "type": "MULTI_METRIC_PATTERN",
-                "subject": dict(SUBJECT),
+                "subject": dict(subject_fields),
                 "context": {
                     "code": code,
                     "official_item_name": ctx["item_name"],
@@ -523,10 +605,7 @@ def build_pattern_candidates(contexts: dict, season: dict) -> tuple[list, list]:
                     "advantage / disadvantage 等帶價值判斷的命名"
                 ),
                 "source_evidence": ["contextual_evidence"],
-                "source_files": [
-                    "data/raw/apart_score_0000006888_2026_A_01.json",
-                    "data/processed/zhang_yucheng_game_logs_2026.json",
-                ],
+                "source_files": list(source_files),
                 "calculation_reference": {
                     "direction_rule": (
                         "逐指標與同一球員的季累計比較：value > baseline 記為 ABOVE，"

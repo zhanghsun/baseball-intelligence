@@ -37,20 +37,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data_source_experiment import request  # noqa: E402  沿用 Step 2 已驗證的請求邏輯
 
+# 球員身分與資料路徑的唯一來源（Step 29B）
+import player_registry as registry  # noqa: E402
+
 BASE = "https://www.cpbl.com.tw"
 APART_PAGE = BASE + "/team/apart"
 APART_API = BASE + "/team/getapartscore"
 
-PLAYER_ACNT = "0000006888"  # 張育成
-PLAYER_LABEL = "張育成（Acnt 0000006888）"
-YEAR = "2026"
-KIND_CODE = "A"  # 一軍例行賽
+# ---- 以下全部由 registry 衍生，本模組不再自己宣告球員身分 ----
+_ACTIVE_PLAYER_ID = registry.default_player_id()
+_SUBJECT = registry.subject(_ACTIVE_PLAYER_ID)
+_DATA_PATHS = registry.data_paths(_ACTIVE_PLAYER_ID)
+
+PLAYER_ACNT = _SUBJECT["player_acnt"]
+PLAYER_LABEL = f"{_SUBJECT['player_name']}（Acnt {PLAYER_ACNT}）"
+YEAR = str(_SUBJECT["season"])
+KIND_CODE = _SUBJECT["kind_code"]
 POSITION_BATTER = "01"  # 01 = 野手
 PITCHER_ATTR_GROUP = "3"  # ItemGroupCode 3 = 投手屬性分項
 
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
-PLAYER_LOG_PATH = PROCESSED_DIR / "zhang_yucheng_game_logs_2026.json"
-RAW_LOG_PATH = PROCESSED_DIR.parent / "raw" / "follow_score_0000006888_2026.json"
+PLAYER_LOG_PATH = _DATA_PATHS["player_log"]
+RAW_LOG_PATH = _DATA_PATHS["follow_raw"]
 
 # 三組情境。key = 組名，value = [(官方 ItemName, 本專案標籤), ...]
 CONTEXT_GROUPS: dict[str, list[tuple[str, str]]] = {
@@ -136,7 +144,7 @@ def fmt4(value: float | None) -> str:
 
 # ---------------------------------------------------------------- 取資料
 
-CACHE_PATH = PROCESSED_DIR.parent / "raw" / "apart_score_0000006888_2026_A_01.json"
+CACHE_PATH = _DATA_PATHS["apart_raw"]
 
 
 def fetch_apart_rows(refetch: bool = False) -> list:

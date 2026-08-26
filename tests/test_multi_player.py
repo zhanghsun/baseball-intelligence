@@ -640,7 +640,225 @@ class TestDataIntegrity(MultiPlayerBase):
                 top.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 top.add(node.module.split(".")[0])
-        self.assertTrue(top <= {"__future__"}, f"未預期的 import：{top}")
+        # Step 29B：registry 現在也宣告資料路徑，因此需要 pathlib（仍是標準庫）。
+        self.assertTrue(top <= {"__future__", "pathlib"},
+                        f"未預期的 import：{top}")
+
+    def test_registry_does_not_import_pipeline_at_module_level(self):
+        """避免循環 import：pipeline 在 module 層級 import registry，
+        registry 對 pipeline 的交叉核對必須是延後 import。"""
+        tree = ast.parse(
+            (ROOT / "src" / "player_registry.py").read_text(encoding="utf-8"))
+        top = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top.add(node.module.split(".")[0])
+        self.assertNotIn("candidate_insights", top)
+
+
+class TestRegistryIsSingleIdentitySource(MultiPlayerBase):
+    """Step 29B：registry 是球員身分與資料路徑的唯一宣告來源。"""
+
+    PIPELINE_FILES = ("candidate_insights.py", "context_splits.py",
+                      "build_processed_data.py")
+
+    def setUp(self) -> None:
+        self.player_id = registry.default_player_id()
+        self.subject = registry.subject(self.player_id)
+        self.paths = registry.data_paths(self.player_id)
+
+    # ---- 2. candidate_insights 的相容常數等於 registry 衍生值 ----
+
+    def test_candidate_insights_constants_are_registry_derived(self):
+        import candidate_insights as ci
+        self.assertEqual(ci.SUBJECT, self.subject)
+        self.assertEqual(ci.SUBJECT_SLUG,
+                         registry.subject_slug(self.player_id))
+        self.assertEqual(ci.PLAYER_LOG_PATH, self.paths["player_log"])
+        self.assertEqual(ci.APART_CACHE_PATH, self.paths["apart_raw"])
+        self.assertEqual(ci.OUTPUT_PATH, self.paths["candidate_output"])
+
+    def test_candidate_insights_subject_field_order_preserved(self):
+        import candidate_insights as ci
+        self.assertEqual(list(ci.SUBJECT), list(registry.SUBJECT_FIELDS))
+
+    # ---- 3. context_splits.PLAYER_ACNT 等於 registry ----
+
+    def test_context_splits_constants_are_registry_derived(self):
+        import context_splits as cs
+        self.assertEqual(cs.PLAYER_ACNT, self.subject["player_acnt"])
+        self.assertEqual(cs.YEAR, str(self.subject["season"]))
+        self.assertEqual(cs.KIND_CODE, self.subject["kind_code"])
+        self.assertEqual(cs.PLAYER_LOG_PATH, self.paths["player_log"])
+        self.assertEqual(cs.RAW_LOG_PATH, self.paths["follow_raw"])
+        self.assertEqual(cs.CACHE_PATH, self.paths["apart_raw"])
+        self.assertIn(self.subject["player_name"], cs.PLAYER_LABEL)
+
+    # ---- 4. build_processed_data.PLAYER_ACNT 等於 registry ----
+
+    def test_build_processed_data_constants_are_registry_derived(self):
+        import build_processed_data as bpd
+        self.assertEqual(bpd.PLAYER_ACNT, self.subject["player_acnt"])
+        self.assertEqual(bpd.YEAR, self.subject["season"])
+        self.assertEqual(bpd.KIND_CODE, self.subject["kind_code"])
+        self.assertEqual(bpd.FUBON_TEAM_CODE, self.subject["team_code"])
+        self.assertEqual(bpd.PLAYER_OUT, self.paths["player_log"])
+        self.assertEqual(bpd.SCHEDULE_OUT, self.paths["team_schedule"])
+
+    # ---- 1. AST：pipeline 不再有獨立的球員字面值宣告 ----
+
+    def test_pipeline_modules_declare_no_player_literals(self):
+        """AST 檢查（不只字串 grep）：三支 pipeline 檔的 module 層級賦值
+        不得再出現球員帳號、姓名或資料檔名的字面值。"""
+        literals = (
+            self.subject["player_acnt"],
+            self.subject["player_name"],
+            registry.subject_slug(self.player_id),
+            "zhang_yucheng",
+            "apart_score_",
+            "follow_score_",
+            "candidate_insights_zhang",
+        )
+        offenders = []
+        for name in self.PIPELINE_FILES:
+            tree = ast.parse((ROOT / "src" / name).read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                        for bad in literals:
+                            if bad in sub.value:
+                                offenders.append(
+                                    f"{name}:{node.lineno} 出現 {bad!r}")
+        self.assertEqual(offenders, [],
+                         f"pipeline 仍有獨立的球員宣告：{offenders[:5]}")
+
+    def test_pipeline_modules_import_registry(self):
+        """三支檔案都必須在 module 層級 import registry。"""
+        for name in self.PIPELINE_FILES:
+            tree = ast.parse((ROOT / "src" / name).read_text(encoding="utf-8"))
+            imported = set()
+            for node in tree.body:
+                if isinstance(node, ast.Import):
+                    imported.update(a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".")[0])
+            self.assertIn("player_registry", imported,
+                          f"{name} 沒有 import player_registry")
+
+    def test_registry_validation_catches_reintroduced_declaration(self):
+        """反證：若有人又在 pipeline 寫死一份 SUBJECT，validate_registry 必須抓到。"""
+        import candidate_insights as ci
+        original = ci.SUBJECT
+        ci.SUBJECT = dict(original, player_acnt="9999999999")
+        try:
+            problems = registry.validate_registry()
+            self.assertTrue(
+                any("SUBJECT" in p for p in problems),
+                f"沒有抓到重新寫死的 SUBJECT：{problems}")
+        finally:
+            ci.SUBJECT = original
+        self.assertEqual(registry.validate_registry(), [])
+
+    def test_registry_validation_catches_reintroduced_path(self):
+        import candidate_insights as ci
+        original = ci.PLAYER_LOG_PATH
+        ci.PLAYER_LOG_PATH = registry.ROOT / "data" / "processed" / "other.json"
+        try:
+            problems = registry.validate_registry()
+            self.assertTrue(
+                any("PLAYER_LOG_PATH" in p for p in problems),
+                f"沒有抓到被改掉的路徑常數：{problems}")
+        finally:
+            ci.PLAYER_LOG_PATH = original
+        self.assertEqual(registry.validate_registry(), [])
+
+    # ---- 身分安全 ----
+
+    def test_data_identity_is_verified_against_file_contents(self):
+        """apart / follow raw 用檔內 HitterAcnt 核對 registry 的 player_acnt。"""
+        result = registry.verify_data_identity(self.player_id)
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(result["missing"], [])
+        self.assertEqual(result["expected_player_acnt"],
+                         self.subject["player_acnt"])
+        self.assertEqual(sorted(result["checked"]), ["apart_raw", "follow_raw"])
+        for found in result["checked"].values():
+            self.assertEqual(found, [self.subject["player_acnt"]])
+
+    def test_processed_log_identity_is_documented_as_path_based(self):
+        """審計已確認 processed 逐場資料沒有內部識別欄位——如實記錄，不發明欄位。"""
+        identity = registry.data_identity(self.player_id)
+        self.assertEqual(identity["player_log"]["kind"], "path_based")
+        self.assertIsNone(identity["player_log"]["internal_field"])
+        self.assertTrue(identity["player_log"]["risk"])
+        result = registry.verify_data_identity(self.player_id)
+        self.assertIn("player_log", result["path_only"])
+        # 沒有為了驗證而在資料檔裡新增欄位
+        rows = json.loads(
+            self.paths["player_log"].read_text(encoding="utf-8"))
+        for key in rows[0]:
+            self.assertNotIn("acnt", key.lower())
+            self.assertNotIn("player", key.lower())
+
+    def test_team_schedule_is_marked_team_level(self):
+        identity = registry.data_identity(self.player_id)
+        self.assertEqual(identity["team_schedule"]["kind"], "team_level")
+        result = registry.verify_data_identity(self.player_id)
+        self.assertIn("team_schedule", result["team"])
+
+    def test_player_scoped_paths_cannot_be_shared(self):
+        """反證：兩位球員共用球員專屬路徑時，validate_registry 必須擋下。"""
+        entry = registry.get_player(self.player_id)
+        clone = copy.deepcopy(entry)
+        clone["player_id"] = "test-only-clone"
+        saved = (registry.PLAYERS, registry.PLAYER_IDS, registry.PLAYER_BY_ID)
+        registry.PLAYERS = (entry, clone)
+        registry.PLAYER_IDS = (entry["player_id"], clone["player_id"])
+        registry.PLAYER_BY_ID = {p["player_id"]: p for p in registry.PLAYERS}
+        try:
+            problems = registry.validate_registry()
+            self.assertTrue(
+                any("不得共用路徑" in p for p in problems),
+                f"沒有擋下共用的球員專屬路徑：{problems}")
+        finally:
+            (registry.PLAYERS, registry.PLAYER_IDS,
+             registry.PLAYER_BY_ID) = saved
+        self.assertEqual(registry.validate_registry(), [])
+
+    def test_unknown_player_path_lookup_raises(self):
+        with self.assertRaises(KeyError):
+            registry.data_paths("no-such-player")
+        with self.assertRaises(KeyError):
+            registry.subject("no-such-player")
+        with self.assertRaises(KeyError):
+            registry.data_path(self.player_id, "no-such-dataset")
+
+    # ---- 6. 沒有引入第二位球員 ----
+
+    def test_still_exactly_one_player(self):
+        self.assertEqual(registry.player_ids(), [KNOWN_PLAYER_ID])
+        _, body = api.dispatch("GET", "/api/players")
+        self.assertEqual(body["player_count"], 1)
+
+    # ---- 5. 既有行為未變 ----
+
+    def test_product_output_unchanged_after_identity_refactor(self):
+        _, payload = api.dispatch("GET", f"/api/player/{KNOWN_PLAYER_ID}")
+        counts = payload["metadata"]["counts"]
+        self.assertEqual(
+            (counts["groups"], counts["candidates"], counts["insights"],
+             counts["metric_rows"]), (9, 29, 9, 25))
+        for field in ("player_acnt", "season", "kind_code", "player_name",
+                      "team", "team_code", "kind_name"):
+            self.assertEqual(payload["player"][field], self.subject[field])
+        # candidate / insight id 仍使用 registry 的 subject_slug
+        slug = registry.subject_slug(self.player_id)
+        for insight_id in payload["factual_insights"]:
+            self.assertIn(slug, insight_id)
 
     def test_no_external_http_in_request_path(self):
         import socket as socket_module

@@ -21,6 +21,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
 # ------------------------------------------------------------------ registry
 
 # 每一筆必須有的欄位
@@ -33,11 +37,47 @@ REQUIRED_FIELDS = (
     "season",
     "kind_code",
     "kind_name",
+    "subject_slug",
+    "data",
     "product_output",
 )
 
 # product_output 區塊必須有的欄位
 REQUIRED_PRODUCT_OUTPUT_FIELDS = ("module", "function", "source_step")
+
+# data 區塊必須有的資料集。值為 repo 相對路徑。
+REQUIRED_DATA_KEYS = (
+    "player_log",
+    "apart_raw",
+    "follow_raw",
+    "candidate_output",
+    "team_schedule",
+)
+
+# 球員專屬資料集（不含球隊層級的賽程）。這些路徑不得被兩位球員共用。
+PLAYER_SCOPED_DATA_KEYS = (
+    "player_log",
+    "apart_raw",
+    "follow_raw",
+    "candidate_output",
+)
+
+# 每個資料集「怎麼證明它屬於這位球員」。
+#   internal_field ：檔案內部有欄位可核對（可驗證）
+#   path_based     ：檔案內部沒有任何球員識別欄位，只能靠路徑（不可驗證）
+#   team_level     ：球隊層級資料，多位球員共用
+IDENTITY_KINDS = ("internal_field", "path_based", "team_level")
+
+# SUBJECT 的欄位組成（供 pipeline 沿用；順序即 candidate_insights.SUBJECT 的順序）
+SUBJECT_FIELDS = (
+    "player_name",
+    "player_acnt",
+    "team",
+    "team_code",
+    "season",
+    "kind_code",
+    "kind_name",
+)
 
 # 目前產品支援的球員。**只有真實存在資料的球員才可以出現在這裡。**
 PLAYERS: tuple[dict, ...] = (
@@ -50,6 +90,65 @@ PLAYERS: tuple[dict, ...] = (
         "season": 2026,
         "kind_code": "A",
         "kind_name": "一軍例行賽",
+        # pipeline 用來組 candidate_id / insight_id 的識別字
+        "subject_slug": "ZHANGYUCHENG-2026-A",
+        # 這位球員的資料檔（repo 相對路徑）。**唯一的路徑宣告來源。**
+        "data": {
+            "player_log":
+                "data/processed/zhang_yucheng_game_logs_2026.json",
+            "apart_raw":
+                "data/raw/apart_score_0000006888_2026_A_01.json",
+            "follow_raw":
+                "data/raw/follow_score_0000006888_2026.json",
+            "candidate_output":
+                "data/processed/candidate_insights_zhang_yucheng_2026.json",
+            # 球隊層級，同隊球員共用
+            "team_schedule":
+                "data/processed/fubon_schedule_2026.json",
+        },
+        # 每個資料集的身分依據。Step 29A 審計的事實，不是推測。
+        "data_identity": {
+            "apart_raw": {
+                "kind": "internal_field",
+                "internal_field": "HitterAcnt",
+                "note": "官方分項每一列都帶 HitterAcnt，可與 registry 的 player_acnt 核對。",
+            },
+            "follow_raw": {
+                "kind": "internal_field",
+                "internal_field": "HitterAcnt",
+                "note": "官方逐場原始回傳帶 HitterAcnt / HitterName，可核對。",
+            },
+            "player_log": {
+                "kind": "path_based",
+                "internal_field": None,
+                "note": (
+                    "Step 4 的 processed 逐場資料**沒有任何球員識別欄位**"
+                    "（17 個欄位都是場次與計數）。因此它的身分目前只能由路徑決定。"
+                    "本專案刻意不為了驗證而改寫既有資料檔。"
+                ),
+                "risk": (
+                    "把別位球員的 player_log 放到這個路徑不會有任何錯誤訊息，"
+                    "會靜默產出錯誤的 insight。緩解方式："
+                    "(a) registry 是唯一路徑來源；"
+                    "(b) 同一路徑不得被兩筆 registry 項目宣告（validate_registry 檢查）；"
+                    "(c) 同目錄下的 follow_raw 有 HitterAcnt，"
+                    "    可用 verify_data_identity 間接佐證這批資料屬於誰。"
+                ),
+            },
+            "candidate_output": {
+                "kind": "path_based",
+                "internal_field": None,
+                "note": (
+                    "Step 9 --write 的產物，pipeline 不讀它。"
+                    "內容含 candidate 的 subject 區塊，但身分仍以路徑為準。"
+                ),
+            },
+            "team_schedule": {
+                "kind": "team_level",
+                "internal_field": None,
+                "note": "富邦悍將的賽程，同隊球員共用，不屬於任何單一球員。",
+            },
+        },
         "product_output": {
             "module": "src/product_output_model.py",
             "function": "build_product_output",
@@ -119,6 +218,119 @@ def public_player_list() -> list[dict]:
     return [public_player_view(entry) for entry in PLAYERS]
 
 
+# ------------------------------------------------------------------ 身分與路徑
+
+def require_player(player_id: str) -> dict:
+    """取 registry 項目，查不到直接拋錯。不猜測、不 fallback。"""
+    entry = get_player(player_id)
+    if entry is None:
+        raise KeyError(
+            f"registry 中沒有 player_id={player_id!r}；"
+            f"目前可用：{player_ids()}"
+        )
+    return entry
+
+
+def data_relpaths(player_id: str) -> dict[str, str]:
+    """該球員各資料集的 repo 相對路徑。"""
+    return dict(require_player(player_id)["data"])
+
+
+def data_paths(player_id: str) -> dict[str, Path]:
+    """該球員各資料集的絕對路徑。**pipeline 唯一該用的路徑來源。**"""
+    return {key: ROOT / rel
+            for key, rel in require_player(player_id)["data"].items()}
+
+
+def data_path(player_id: str, key: str) -> Path:
+    paths = data_paths(player_id)
+    if key not in paths:
+        raise KeyError(f"{player_id} 沒有資料集 {key!r}；可用：{sorted(paths)}")
+    return paths[key]
+
+
+def subject(player_id: str) -> dict:
+    """pipeline 用的 subject dict（即 candidate_insights.SUBJECT 的內容）。"""
+    entry = require_player(player_id)
+    return {field: entry[field] for field in SUBJECT_FIELDS}
+
+
+def subject_slug(player_id: str) -> str:
+    return require_player(player_id)["subject_slug"]
+
+
+def data_identity(player_id: str) -> dict:
+    """各資料集的身分依據（含 path_based 的風險說明）。"""
+    import copy
+    return copy.deepcopy(require_player(player_id)["data_identity"])
+
+
+def verify_data_identity(player_id: str) -> dict:
+    """用資料檔內部欄位核對 registry 宣告的 player_acnt。
+
+    這一支刻意與 `validate_registry()` 分開：它會讀檔，成本較高，
+    因此不放在每次 health 檢查的路徑上。
+
+    回傳 dict：
+        checked   已核對的資料集 -> 檔內找到的帳號集合
+        path_only 無內部識別欄位、只能靠路徑的資料集
+        team      球隊層級資料集
+        missing   宣告了但檔案不存在
+        problems  不一致或無法核對的問題清單（空 = 通過）
+    """
+    import json
+
+    entry = require_player(player_id)
+    expected = entry["player_acnt"]
+    identity = entry["data_identity"]
+    paths = data_paths(player_id)
+
+    result: dict = {
+        "player_id": player_id,
+        "expected_player_acnt": expected,
+        "checked": {},
+        "path_only": [],
+        "team": [],
+        "missing": [],
+        "problems": [],
+    }
+
+    for key, path in paths.items():
+        spec = identity.get(key)
+        if spec is None:
+            result["problems"].append(f"{key} 沒有 data_identity 宣告")
+            continue
+        if spec["kind"] not in IDENTITY_KINDS:
+            result["problems"].append(f"{key} 的 identity kind 不在受控詞彙內")
+            continue
+        if not path.exists():
+            result["missing"].append(key)
+            continue
+        if spec["kind"] == "team_level":
+            result["team"].append(key)
+            continue
+        if spec["kind"] == "path_based":
+            result["path_only"].append(key)
+            continue
+
+        field = spec["internal_field"]
+        rows = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(rows, list) or not rows:
+            result["problems"].append(f"{key} 不是非空的列表，無法核對身分")
+            continue
+        found = sorted({str(r.get(field)) for r in rows if field in r})
+        result["checked"][key] = found
+        if not found:
+            result["problems"].append(f"{key} 找不到欄位 {field}")
+        elif found != [expected]:
+            result["problems"].append(
+                f"{key} 的 {field} 與 registry 不符："
+                f"檔內 {found} vs registry {expected!r}"
+            )
+
+    return result
+
+
 # ------------------------------------------------------------------ 驗證
 
 def validate_registry() -> list[str]:
@@ -142,6 +354,23 @@ def validate_registry() -> list[str]:
         for field in REQUIRED_PRODUCT_OUTPUT_FIELDS:
             if not po.get(field):
                 problems.append(f"{label} 的 product_output 缺 {field}")
+        data = entry.get("data") or {}
+        for key in REQUIRED_DATA_KEYS:
+            if not data.get(key):
+                problems.append(f"{label} 的 data 缺 {key}")
+        for key in data:
+            if key not in REQUIRED_DATA_KEYS:
+                problems.append(f"{label} 的 data 出現未預期的 key：{key}")
+            if str(data[key]).startswith("/") or ".." in str(data[key]):
+                problems.append(f"{label} 的 data.{key} 不是 repo 相對路徑")
+        ident = entry.get("data_identity") or {}
+        for key in REQUIRED_DATA_KEYS:
+            spec = ident.get(key)
+            if not spec or spec.get("kind") not in IDENTITY_KINDS:
+                problems.append(f"{label} 的 data_identity 缺或無效：{key}")
+            elif spec["kind"] == "internal_field" and not spec.get("internal_field"):
+                problems.append(f"{label} 的 data_identity.{key} 缺 internal_field")
+
         pid = entry.get("player_id")
         if pid in seen:
             problems.append(f"重複的 player_id：{pid}")
@@ -151,43 +380,55 @@ def validate_registry() -> list[str]:
         if pid and (" " in pid or "/" in pid):
             problems.append(f"player_id 不得含空白或斜線：{pid}")
 
+    # 球員專屬資料路徑不得被兩位球員共用。
+    # 這是 player_log「只能靠路徑決定身分」時唯一可行的結構性防護。
+    for key in PLAYER_SCOPED_DATA_KEYS:
+        owners: dict[str, list[str]] = {}
+        for entry in PLAYERS:
+            rel = (entry.get("data") or {}).get(key)
+            if rel:
+                owners.setdefault(rel, []).append(entry["player_id"])
+        for rel, ids in owners.items():
+            if len(ids) > 1:
+                problems.append(
+                    f"data.{key} 路徑 {rel} 被多位球員宣告：{ids}。"
+                    "球員專屬資料不得共用路徑。"
+                )
+
     if len(PLAYER_IDS) != len(PLAYER_BY_ID):
         problems.append("PLAYER_IDS 與 PLAYER_BY_ID 筆數不一致")
     if list(PLAYER_BY_ID) != list(PLAYER_IDS):
         problems.append("PLAYER_BY_ID 的順序與 PLAYER_IDS 不一致")
 
-    # 與實際 pipeline 的 subject 交叉核對（延後 import，避免不必要的副作用）
+    # 與 pipeline 交叉核對：pipeline 匯出的 SUBJECT / SUBJECT_SLUG / 路徑常數
+    # 必須**就是**由 registry 衍生出來的值。
+    # Step 29B 起 pipeline 不再自己宣告這些，這道檢查用來擋住「有人又寫死一份」。
+    # 延後 import：candidate_insights 在 module 層級 import 本模組，
+    # 若這裡也在 module 層級反向 import 就會造成循環。
     try:
-        from candidate_insights import SUBJECT
+        import candidate_insights as ci
     except Exception as exc:  # noqa: BLE001
-        problems.append(f"無法載入 pipeline subject 進行交叉核對：{type(exc).__name__}")
+        problems.append(f"無法載入 pipeline 進行交叉核對：{type(exc).__name__}")
         return problems
 
-    subject_entries = [
-        e for e in PLAYERS
-        if e["player_acnt"] == SUBJECT["player_acnt"]
-        and e["season"] == SUBJECT["season"]
-        and e["kind_code"] == SUBJECT["kind_code"]
-    ]
-    if len(subject_entries) != 1:
-        problems.append(
-            "registry 中應該恰好有一筆對應目前 pipeline subject "
-            f"（Acnt {SUBJECT['player_acnt']} / {SUBJECT['season']} / "
-            f"{SUBJECT['kind_code']}），實際 {len(subject_entries)} 筆"
-        )
-    else:
-        entry = subject_entries[0]
-        for registry_field, subject_field in (
-            ("player_name", "player_name"),
-            ("team", "team"),
-            ("team_code", "team_code"),
-            ("kind_name", "kind_name"),
-        ):
-            if entry[registry_field] != SUBJECT[subject_field]:
+    if len(PLAYERS) == 1:
+        pid = PLAYER_IDS[0]
+        if ci.SUBJECT != subject(pid):
+            problems.append(
+                "candidate_insights.SUBJECT 不等於 registry 衍生的 subject，"
+                "表示 pipeline 又出現了獨立的球員宣告"
+            )
+        if ci.SUBJECT_SLUG != subject_slug(pid):
+            problems.append(
+                "candidate_insights.SUBJECT_SLUG 不等於 registry 的 subject_slug"
+            )
+        paths = data_paths(pid)
+        for attr, key in (("PLAYER_LOG_PATH", "player_log"),
+                          ("APART_CACHE_PATH", "apart_raw"),
+                          ("OUTPUT_PATH", "candidate_output")):
+            if getattr(ci, attr) != paths[key]:
                 problems.append(
-                    f"{entry['player_id']} 的 {registry_field} 與 pipeline "
-                    f"SUBJECT.{subject_field} 不一致："
-                    f"{entry[registry_field]!r} vs {SUBJECT[subject_field]!r}"
+                    f"candidate_insights.{attr} 不等於 registry 的 data.{key}"
                 )
 
     # 目前 pipeline 只支援一位球員，registry 不得多於它實際能產出的球員數
@@ -241,14 +482,41 @@ def main() -> None:
         po = entry["product_output"]
         print(f"      builder  : {po['module']}::{po['function']}"
               f"（{po['source_step']}）")
+        print(f"      slug     : {entry['subject_slug']}")
+        print("      data     :")
+        for key, rel in entry["data"].items():
+            kind = entry["data_identity"][key]["kind"]
+            field = entry["data_identity"][key]["internal_field"] or "-"
+            print(f"          {key:<17} {rel}")
+            print(f"          {'':<17} identity={kind}　field={field}")
     print()
     print(f"  [{'PASS' if not problems else 'FAIL'}] registry 一致性檢查")
     if problems:
         for item in problems:
             print(f"         - {item}")
     else:
-        print("         必填欄位齊全、player_id 無重複、順序一致，"
-              "且與 pipeline SUBJECT 交叉核對相符")
+        print("         必填欄位齊全、player_id 與資料路徑無重複、順序一致；")
+        print("         pipeline 的 SUBJECT / SUBJECT_SLUG / 路徑常數"
+              "確認為 registry 衍生值")
+
+    print()
+    for entry in PLAYERS:
+        pid = entry["player_id"]
+        result = verify_data_identity(pid)
+        ok = not result["problems"] and not result["missing"]
+        print(f"  [{'PASS' if ok else 'FAIL'}] {pid} 資料檔身分核對")
+        for key, found in result["checked"].items():
+            field = entry["data_identity"][key]["internal_field"]
+            print(f"         {key}：檔內 {field}={found} "
+                  f"== registry {result['expected_player_acnt']}")
+        if result["path_only"]:
+            print(f"         僅路徑可辨識（檔內無識別欄位）：{result['path_only']}")
+        if result["team"]:
+            print(f"         球隊層級共用：{result['team']}")
+        if result["missing"]:
+            print(f"         檔案不存在：{result['missing']}")
+        for item in result["problems"]:
+            print(f"         - {item}")
     print()
     print("  目前 registry 只有一位球員。架構已 multi-player ready，")
     print("  但不會為了看起來支援多球員而偽造任何資料。")

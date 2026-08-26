@@ -42,6 +42,10 @@ from context_splits import build_context, trunc4  # noqa: E402
 from player_form_analysis import build_window, sort_by_date  # noqa: E402
 from rolling_baseline import build_rolling_windows, rank_and_percentile  # noqa: E402
 
+# 球員身分與資料路徑的唯一來源。player_registry 在 module 層級不 import 本模組，
+# 因此不會形成循環（它的交叉核對是延後 import）。
+import player_registry as registry  # noqa: E402
+
 
 # ------------------------------------------------------------------ 網路封鎖
 # 封鎖對外連線，確保本階段不可能發出任何網路請求。
@@ -78,20 +82,19 @@ install_network_guard()
 # ------------------------------------------------------------------ 常數
 
 ROOT = Path(__file__).resolve().parent.parent
-PLAYER_LOG_PATH = ROOT / "data" / "processed" / "zhang_yucheng_game_logs_2026.json"
-APART_CACHE_PATH = ROOT / "data" / "raw" / "apart_score_0000006888_2026_A_01.json"
-OUTPUT_PATH = ROOT / "data" / "processed" / "candidate_insights_zhang_yucheng_2026.json"
 
-SUBJECT = {
-    "player_name": "張育成",
-    "player_acnt": "0000006888",
-    "team": "富邦悍將",
-    "team_code": "AEO011",
-    "season": 2026,
-    "kind_code": "A",
-    "kind_name": "一軍例行賽",
-}
-SUBJECT_SLUG = "ZHANGYUCHENG-2026-A"
+# ---- 球員身分與資料路徑：**唯一來源是 src/player_registry.py** ----
+# Step 29B 起本模組不再自己宣告球員帳號、姓名或檔名。
+# 以下常數全部是 registry 的衍生值，名稱保留是為了不破壞既有 10 支模組的 import。
+_ACTIVE_PLAYER_ID = registry.default_player_id()
+_DATA_PATHS = registry.data_paths(_ACTIVE_PLAYER_ID)
+
+PLAYER_LOG_PATH = _DATA_PATHS["player_log"]
+APART_CACHE_PATH = _DATA_PATHS["apart_raw"]
+OUTPUT_PATH = _DATA_PATHS["candidate_output"]
+
+SUBJECT = registry.subject(_ACTIVE_PLAYER_ID)
+SUBJECT_SLUG = registry.subject_slug(_ACTIVE_PLAYER_ID)
 
 # 官方 ItemName -> candidate 用的 context 代碼
 CONTEXT_CODES = {

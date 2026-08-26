@@ -30,14 +30,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data_source_experiment import fetch_follow_score  # noqa: E402
 from schedule_source_experiment import fetch_year_schedule  # noqa: E402
 
-YEAR = 2026
-KIND_CODE = "A"  # 一軍例行賽
-FUBON_TEAM_CODE = "AEO011"
-PLAYER_ACNT = "0000006888"  # 張育成
+# 球員身分與資料路徑的唯一來源（Step 29B）
+import player_registry as registry  # noqa: E402
+
+# ---- 以下全部由 registry 衍生，本模組不再自己宣告球員身分 ----
+_ACTIVE_PLAYER_ID = registry.default_player_id()
+_SUBJECT = registry.subject(_ACTIVE_PLAYER_ID)
+_DATA_PATHS = registry.data_paths(_ACTIVE_PLAYER_ID)
+
+YEAR = _SUBJECT["season"]
+KIND_CODE = _SUBJECT["kind_code"]
+FUBON_TEAM_CODE = _SUBJECT["team_code"]
+PLAYER_ACNT = _SUBJECT["player_acnt"]
 
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
-SCHEDULE_OUT = PROCESSED_DIR / "fubon_schedule_2026.json"
-PLAYER_OUT = PROCESSED_DIR / "zhang_yucheng_game_logs_2026.json"
+SCHEDULE_OUT = _DATA_PATHS["team_schedule"]
+PLAYER_OUT = _DATA_PATHS["player_log"]
 
 # GameResult 代碼對照，取自賽程頁 Vue 模板的判斷式
 GAME_STATUS = {

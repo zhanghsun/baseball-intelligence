@@ -661,8 +661,9 @@ class TestDataIntegrity(MultiPlayerBase):
 class TestRegistryIsSingleIdentitySource(MultiPlayerBase):
     """Step 29B：registry 是球員身分與資料路徑的唯一宣告來源。"""
 
+    # Step 29C 起 insight_chain 的身分常數也由 registry 衍生，一併納入檢查
     PIPELINE_FILES = ("candidate_insights.py", "context_splits.py",
-                      "build_processed_data.py")
+                      "build_processed_data.py", "insight_chain.py")
 
     def setUp(self) -> None:
         self.player_id = registry.default_player_id()
@@ -836,6 +837,75 @@ class TestRegistryIsSingleIdentitySource(MultiPlayerBase):
             registry.subject("no-such-player")
         with self.assertRaises(KeyError):
             registry.data_path(self.player_id, "no-such-dataset")
+
+    # ---- Step 29C：input loading 參數化 ----
+
+    def test_load_inputs_legacy_call_still_works(self):
+        import candidate_insights as ci
+        logs, apart_rows = ci.load_inputs()
+        self.assertIsInstance(logs, list)
+        self.assertIsInstance(apart_rows, list)
+        self.assertGreater(len(logs), 0)
+        self.assertGreater(len(apart_rows), 0)
+
+    def test_load_inputs_with_player_id_matches_legacy(self):
+        import candidate_insights as ci
+        legacy_logs, legacy_apart = ci.load_inputs()
+        keyed_logs, keyed_apart = ci.load_inputs(self.player_id)
+        self.assertEqual(keyed_logs, legacy_logs)
+        self.assertEqual(keyed_apart, legacy_apart)
+
+    def test_input_paths_come_from_registry(self):
+        import candidate_insights as ci
+        self.assertEqual(ci.input_paths(),
+                         (self.paths["player_log"], self.paths["apart_raw"]))
+        self.assertEqual(ci.input_paths(self.player_id), ci.input_paths())
+
+    def test_load_inputs_rejects_unknown_player(self):
+        import candidate_insights as ci
+        with self.assertRaises(KeyError):
+            ci.load_inputs("no-such-player")
+        with self.assertRaises(KeyError):
+            ci.input_paths("no-such-player")
+
+    def test_load_schedule_legacy_call_still_works(self):
+        import insight_chain as ic
+        schedule = ic.load_schedule()
+        self.assertIsInstance(schedule, list)
+        self.assertGreater(len(schedule), 0)
+
+    def test_load_schedule_with_player_id_uses_registry_path(self):
+        import insight_chain as ic
+        self.assertEqual(ic.schedule_path(self.player_id),
+                         self.paths["team_schedule"])
+        self.assertEqual(ic.schedule_path(), ic.schedule_path(self.player_id))
+        self.assertEqual(ic.load_schedule(self.player_id), ic.load_schedule())
+
+    def test_load_schedule_rejects_unknown_player(self):
+        import insight_chain as ic
+        with self.assertRaises(KeyError):
+            ic.schedule_path("no-such-player")
+        with self.assertRaises(KeyError):
+            ic.load_schedule("no-such-player")
+
+    def test_insight_chain_identity_constants_are_registry_derived(self):
+        import insight_chain as ic
+        self.assertEqual(ic.SCHEDULE_PATH, self.paths["team_schedule"])
+        self.assertEqual(ic.FUBON_TEAM_CODE, self.subject["team_code"])
+        self.assertEqual(ic.PLAYER_NAME, self.subject["player_name"])
+        self.assertEqual(ic.SEASON, self.subject["season"])
+
+    def test_loading_functions_accept_optional_player_id(self):
+        """介面檢查：兩支載入函式都必須有可選的 player_id 參數。"""
+        import inspect
+        import candidate_insights as ci
+        import insight_chain as ic
+        for func in (ci.load_inputs, ci.input_paths,
+                     ic.load_schedule, ic.schedule_path):
+            params = list(inspect.signature(func).parameters.values())
+            self.assertEqual(len(params), 1, func.__name__)
+            self.assertEqual(params[0].name, "player_id", func.__name__)
+            self.assertIsNone(params[0].default, func.__name__)
 
     # ---- 6. 沒有引入第二位球員 ----
 

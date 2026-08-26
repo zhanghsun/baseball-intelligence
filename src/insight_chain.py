@@ -54,12 +54,22 @@ from candidate_insights import (  # noqa: E402
 from evidence_sample_context import build_record, build_trend_components  # noqa: E402
 from player_form_analysis import build_window, sort_by_date  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-SCHEDULE_PATH = ROOT / "data" / "processed" / "fubon_schedule_2026.json"
+# 身分與資料路徑的唯一來源。player_registry 在 module 層級不 import 任何
+# pipeline 模組，因此不會形成循環 import。
+import player_registry as registry  # noqa: E402
 
-FUBON_TEAM_CODE = "AEO011"
-PLAYER_NAME = "張育成"
-SEASON = 2026
+ROOT = Path(__file__).resolve().parent.parent
+
+# ---- 球員／球隊身分與賽程路徑：唯一來源是 src/player_registry.py（Step 29B/29C）----
+# 名稱全部保留，只是改成 registry 衍生值，讓既有 import 不受影響。
+_ACTIVE_PLAYER_ID = registry.default_player_id()
+_SUBJECT = registry.subject(_ACTIVE_PLAYER_ID)
+
+SCHEDULE_PATH = registry.data_path(_ACTIVE_PLAYER_ID, "team_schedule")
+
+FUBON_TEAM_CODE = _SUBJECT["team_code"]
+PLAYER_NAME = _SUBJECT["player_name"]
+SEASON = _SUBJECT["season"]
 
 # ------------------------------------------------------------------ 受控詞彙
 
@@ -117,12 +127,29 @@ IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # ------------------------------------------------------------------ 工具
 
-def load_schedule() -> list:
-    if not SCHEDULE_PATH.exists():
+def schedule_path(player_id: str | None = None) -> Path:
+    """該球員所屬球隊的賽程路徑。
+
+    `player_id is None` 沿用模組層級的 `SCHEDULE_PATH`（相容行為）；
+    指定 player_id 則由 registry 的 `team_schedule` 決定。
+    賽程是**球隊層級**資料，同隊球員共用同一個檔案。
+    """
+    if player_id is None:
+        return SCHEDULE_PATH
+    return registry.data_path(player_id, "team_schedule")
+
+
+def load_schedule(player_id: str | None = None) -> list:
+    """讀入賽程。Step 29C 加上可選的 `player_id`，只影響路徑來源。
+
+    parsing 與後續 chain 計算邏輯完全未變。
+    """
+    path = schedule_path(player_id)
+    if not path.exists():
         raise SystemExit(
-            f"找不到 {SCHEDULE_PATH}\n請先執行：python src/build_processed_data.py"
+            f"找不到 {path}\n請先執行：python src/build_processed_data.py"
         )
-    return json.loads(SCHEDULE_PATH.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def prov(step: str, file: str, field: str | None, derivation: str,

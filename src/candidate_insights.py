@@ -147,8 +147,28 @@ def fmt(value: float | None, digits: int = 8) -> str:
 
 # ------------------------------------------------------------------ 載入 evidence
 
-def load_inputs() -> tuple[list, list]:
-    for path in (PLAYER_LOG_PATH, APART_CACHE_PATH):
+def input_paths(player_id: str | None = None) -> tuple[Path, Path]:
+    """回傳 (player_log, apart_raw) 兩個輸入路徑。
+
+    `player_id is None`：沿用模組層級的相容常數（即 registry 預設球員），
+    行為與 Step 29B 之前完全相同。
+    指定 `player_id`：一律從 `player_registry.data_paths()` 取得，
+    本模組不再自己拼任何檔名。
+    """
+    if player_id is None:
+        return PLAYER_LOG_PATH, APART_CACHE_PATH
+    paths = registry.data_paths(player_id)
+    return paths["player_log"], paths["apart_raw"]
+
+
+def load_inputs(player_id: str | None = None) -> tuple[list, list]:
+    """讀入這位球員的 evidence 輸入。
+
+    Step 29C：加上可選的 `player_id`。不給就是既有行為（相容），
+    給了就由 registry 決定路徑。**不做任何計算，只負責載入。**
+    """
+    log_path, apart_path = input_paths(player_id)
+    for path in (log_path, apart_path):
         if not path.exists():
             raise SystemExit(
                 f"找不到 {path}\n"
@@ -156,8 +176,8 @@ def load_inputs() -> tuple[list, list]:
                 "  python src/build_processed_data.py\n"
                 "  python src/context_splits.py --refetch"
             )
-    logs = json.loads(PLAYER_LOG_PATH.read_text(encoding="utf-8"))
-    apart_rows = json.loads(APART_CACHE_PATH.read_text(encoding="utf-8"))
+    logs = json.loads(log_path.read_text(encoding="utf-8"))
+    apart_rows = json.loads(apart_path.read_text(encoding="utf-8"))
     return logs, apart_rows
 
 

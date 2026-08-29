@@ -1,28 +1,67 @@
 # Baseball Intelligence
 
 > 目前狀態：**MVP 可在本機執行**。後端 API、前端頁面、手動資料更新都已完成。
-> 尚未有自動更新，也尚未公開部署。目前只支援一位球員。
+> API 與前端已改為 registry 驅動，但**分析 pipeline 尚未真正支援第二位球員**。
+> 尚未有自動更新，也尚未公開部署。目前 registry 只有一位球員。
+>
+> 要接手這個專案（尤其是 AI coding agent）請先讀
+> [docs/DEVELOPMENT_HANDOFF.md](docs/DEVELOPMENT_HANDOFF.md)。
 
 ## 1. Project overview
 
 把 CPBL 官方比賽紀錄，轉換成分析人員看得懂、且每個數字都能追溯來源的
 insight，並透過一個唯讀 API 提供給網頁呈現。
 
-核心流程：
+核心流程（目前真正存在的架構）：
 
 ```
-CPBL 官方資料
-  → raw / processed data
-  → evidence（逐場計數、季累計、滾動分布、官方分項）
-  → insight（candidate → grouping → presentation model → factual insight）
-  → Product Output
-  → Backend API
-  → Frontend
+CPBL data
+  ↓
+raw / processed data
+  ↓
+candidate generation
+  ↓
+grouping / decision relevance
+  ↓
+presentation model
+  ↓
+factual insight assembly
+  ↓
+product output
+  ↓
+read-only API
+  ↓
+frontend
+```
+
+身分與資料路徑則是另一條線，貫穿前半段：
+
+```
+registry（src/player_registry.py）
+  ↓
+player identity / data paths
+  ↓
+input loading
+  ↓
+candidate generation
 ```
 
 - 目標使用者：球隊的數據分析人員
 - 案例球隊：富邦悍將
-- **目前產品只支援一位球員：張育成（Acnt `0000006888`）、2026 一軍例行賽**
+- **目前 registry 只有一位球員：張育成（Acnt `0000006888`）、2026 一軍例行賽**
+
+### Multi-player progress
+
+**API 與 frontend 已經 registry-driven，但分析 pipeline 尚未真正支援第二位球員。**
+
+已完成：registry 是身分與路徑的唯一來源；input loading 與 candidate generation
+都接受球員參數；`/api/players` 與前端選單都由 registry 驅動。
+
+尚未完成：grouping / presentation model / factual insight assembly /
+product output 這幾層仍讀模組層級的單一 subject。`validate_registry()` 目前
+刻意禁止 registry 超過一位球員，等這幾層參數化完成才能解除。
+
+細節見 [docs/DEVELOPMENT_HANDOFF.md](docs/DEVELOPMENT_HANDOFF.md)。
 
 專案最重要的一條原則：
 
@@ -30,18 +69,40 @@ CPBL 官方資料
 
 ## 2. Current status
 
+### DONE
+
+| 項目 | 說明 |
+| --- | --- |
+| Factual evidence pipeline | 逐場計數、季累計、滾動分布、官方分項 |
+| Candidate generation | 29 個 candidate（TREND / CONTEXT / MULTI_METRIC_PATTERN） |
+| Insight grouping | 依 scope 聚合成 9 個 group |
+| Decision relevance | candidate 層與 group 層的決策關聯（受控詞彙） |
+| Presentation model | 呈現模型，evidence / application 兩個資料狀態分離 |
+| Factual insight assembly | 可閱讀但完全可追溯的 insight object |
+| Product output model | machine-readable 產品輸出（頂層 9 個區塊） |
+| Read-only backend API | `/api/health`、`/api/players`、`/api/player/{player_id}` |
+| Frontend MVP | 單頁，原生 HTML / CSS / JS，含球員選單 |
+| Manual data refresh | `src/refresh_data.py`，含原子寫入與失敗還原 |
+| Registry-driven player API | 路由與前端清單都由 registry 決定，沒有寫死 player id |
+| Player identity single source of truth | `src/player_registry.py` 是身分與資料路徑的唯一來源 |
+| Parameterized input loading | `load_inputs(player_id=None)`、`load_schedule(player_id=None)` |
+| Parameterized candidate generation | 三個 candidate builder 都接受 `subject=None` |
+
+### CURRENT LIMITATION
+
+- **registry 目前只有張育成一位球員**，因為只有這一位有真實資料
+- **真正的多球員 pipeline 尚未完成**：API 與前端已 registry 驅動，
+  但 insight / presentation / product output 層仍綁在單一 subject 上
+
+### NOT DONE
+
 | 項目 | 狀態 |
 | --- | --- |
-| CPBL 資料取得（賽程 / 逐場 / 官方分項） | 已完成 |
-| Evidence 與 insight 分析 pipeline | 已完成 |
-| Product Output（machine-readable 產品輸出） | 已完成 |
-| Backend API（唯讀） | **已完成** |
-| Frontend MVP（單頁） | **已完成** |
-| 手動 data refresh | **已完成** |
-| 自動資料更新 / scheduler | **尚未完成** |
-| 公開部署 | **尚未完成** |
-| 多球員支援 | **尚未完成**（目前只有張育成） |
-| Production infrastructure（認證、rate limit、監控、CI） | **尚未完成** |
+| multi-player candidate → insight → product-output pipeline | 尚未完成 |
+| multi-player refresh | 尚未完成 |
+| 自動資料更新 / scheduler | 尚未完成 |
+| 公開部署 | 尚未完成 |
+| Production infrastructure（認證、rate limit、監控、CI） | 尚未完成 |
 | 資料庫 | 沒有，也沒有計畫在 MVP 階段加入 |
 | LLM | 沒有使用 |
 
@@ -198,13 +259,15 @@ python src/refresh_data.py --no-fetch    # 零 HTTP，用現有本地資料重�
 三個測試套件，全部用 Python 標準庫 `unittest`，沒有引入 pytest 或任何測試框架：
 
 ```
-python tests/test_refresh.py
+python tests/test_multi_player.py
 python tests/test_api.py
 python tests/test_frontend.py
+python tests/test_refresh.py
 ```
 
-**Latest verified result：41 + 43 + 58 = 142 tests PASS。**
-（這是最後一次驗證的結果紀錄，不是永久保證。程式或資料變動後請重新執行。）
+**Latest verified regression result：88 + 43 + 58 + 41 = 230 / 230 PASS。**
+
+這是**目前 checkpoint 的驗證結果，不是永久保證**。程式或資料變動後請重新執行。
 
 測試涵蓋的重點：
 
@@ -309,8 +372,11 @@ HTTP `Date` header。
 已完成的比賽。要知道目前資料到哪一天，直接看 `/api/player/zhang-yucheng` 回應
 中的 `api.data_as_of.reference_date`，或看頁面頂端的「資料截至」。
 
-作為紀錄：最後一次驗證過的 refresh 產出的 `reference_date` 是 `2026-08-23`。
-這只是當時的快照，不代表 repository 永遠處於最新狀態。
+作為紀錄：**目前本地資料的最後驗證日期是 `2026-08-23`**（即最後一次 refresh 後
+的 `reference_date`）。
+
+這是**目前本地資料的最後驗證日期，不代表網站永遠即時**。CPBL 之後的新比賽不會
+自動出現在這個 repository 裡 —— 必須有人手動執行一次 refresh。
 
 執行中的 API process 不會自動看到新資料 —— refresh 完要重啟 `src/api.py`。
 
@@ -337,8 +403,9 @@ HTTP `Date` header。
 
 如實列出目前的限制：
 
-- **只支援一位球員**（張育成）。沒有多球員 API、沒有球員列表端點、
-  沒有球員切換 UI
+- **目前只有一位真實球員**（張育成）。球員列表端點與前端切換 UI 已存在且由
+  registry 驅動，但**分析 pipeline 尚未真正支援第二位球員**，因此
+  `validate_registry()` 目前刻意禁止 registry 超過一位
 - **只涵蓋一個球季**（2026 一軍例行賽）
 - **資料更新是手動的**，沒有 scheduler、沒有 cron、沒有背景服務、
   沒有自動 refresh
@@ -361,8 +428,9 @@ HTTP `Date` header。
 
 目前合理的下一階段，依序：
 
-1. **多球員化** —— 把 Product Output 從單一球員擴充成可指定球員，
-   並提供球員列表端點與前端切換
+1. **完成多球員化** —— registry、input loading、candidate generation 已完成；
+   還要把 insight / presentation / product output 層參數化，然後才是
+   multi-player pipeline 與 multi-player refresh
 2. **自動資料更新** —— 在手動 refresh 已經可靠的基礎上，加上排程與失敗通知
 3. **公開部署** —— 正式的 WSGI/ASGI 伺服器或反向代理、環境設定、CORS 政策
 4. **Production hardening** —— 認證、rate limiting、監控、CI、schema 文件
@@ -376,6 +444,7 @@ ranking、prediction、recommendation **不在** roadmap 上。那些方向與�
 
 | 文件 | 內容 |
 | --- | --- |
+| [DEVELOPMENT_HANDOFF.md](docs/DEVELOPMENT_HANDOFF.md) | **接手用**：目前 checkpoint、已完成／未完成、殘留耦合、安全規則 |
 | [PROJECT_DESIGN.md](docs/PROJECT_DESIGN.md) | 專案目標與設計原則 |
 | [BACKEND_API.md](docs/BACKEND_API.md) | API 端點、回應結構、錯誤處理、CORS |
 | [FRONTEND_MVP.md](docs/FRONTEND_MVP.md) | 前端結構、啟動方式、缺資料呈現規則 |
